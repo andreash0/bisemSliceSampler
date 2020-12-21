@@ -1,0 +1,256 @@
+---
+title: "Regression with Slice Sampling"
+author: "Andreas Hofheinz"
+date: "25 11 2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+set.seed(20201128)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE, message=FALSE}
+library(bisemSliceSampler)
+library(latex2exp)
+library(patchwork)
+library(ggplot2)
+```
+
+```{r, warning=FALSE, message=FALSE}
+data(BostonHousing, package  = "mlbench")
+keep_cols <- c("crim", "lstat", "age", "medv")
+housing_sub <- subset(BostonHousing, select = keep_cols)
+```
+
+```{r}
+#summary(BostonHousing)
+```
+
+
+```{r}
+# Add column with all 1s for intercept
+X <- cbind("intercept" = 1, as.matrix(subset(housing_sub, select = -medv)))
+y <- housing_sub$medv
+```
+
+**Model:**
+
+$y_{\text {medv }, i}=\beta_{0}+\beta_{1} x_{\mathrm{crim}, i}+\beta_{2} x_{\mathrm{lstat}, i}+\beta_{3} x_{\text {age }, i}+\beta_{4} x_{\text {medv }, i}+\epsilon_{i}, \quad i=1, \cdots, n$ \
+with $\epsilon_{i} \stackrel{\mathrm{iid}}{\sim} \operatorname{Normal}\left(0, \sigma^{2}\right)$
+
+
+$\Longrightarrow y_i \mid \boldsymbol{\beta}, \sigma^{2} \stackrel{\mathrm{i.i.d}}{\sim} \operatorname{N}\left({\mathbf{x_i}}^T\beta, \sigma^{2}\right)$
+
+\bigskip
+
+
+**Likelihood:**
+
+$L\left(\mu, \sigma^{2}\right) \propto \left(\sigma^{2}\right)^{-n / 2} \exp \left(-\frac{1}{2 \sigma^{2}} \sum_{i=1}^{n}\left(y_{i}-{\mathbf{x}_i}^T\beta\right)^{2}\right)$
+
+\bigskip
+
+
+
+**Prior**
+
+In this example we use the reference prior for multiple linear regression:
+
+$p\left(\boldsymbol{\beta} , \sigma^{2}\right) \propto \frac{1}{\sigma^{2}}$
+
+
+\bigskip
+
+**Posterior**
+
+$$
+p\left(\boldsymbol{\beta} , \sigma^{2} \mid \boldsymbol{y} \right)
+\propto \left(\sigma^{2}\right)^{-n / 2} \exp \left(-\frac{1}{2 \sigma^{2}} \sum_{i=1}^{n}\left(y_{i}-{\mathbf{x}_i}^T\beta\right)^{2}\right) * \frac{1}{\sigma^{2}}
+$$
+
+
+**Log-Posterior**
+
+$$
+log(p\left(\boldsymbol{\beta} , \sigma^{2} \mid \boldsymbol{y} \right))
+\propto -\frac{n+2}{2} \log \left(\sigma^{2}\right)-\frac{1}{2 \sigma^{2}} \sum_{i=1}^{n}\left(y_{j}-{\mathbf{x}_i}^T\beta\right)^{2}
+$$
+
+```{r}
+logpost <- function(theta) {
+  beta <- theta[-length(theta)]
+  sigma_sq <- theta[length(theta)]
+  n <- length(y)
+  -((n + 2)/2 * log(sigma_sq)) - (1/(2 * sigma_sq)) * crossprod(y - (X %*% beta))
+}
+```
+
+Note: $\boldsymbol{\theta} = (\boldsymbol{\beta}, \sigma^{2}) = (\beta_0, \beta_1, \beta_2, \beta_3, \sigma^{2})$
+
+\bigskip
+
+
+**Sampling from Log-Posterior**
+
+```{r}
+w_intercept <- 10
+w_rest <- 0.4
+w <- c(w_intercept, rep(w_rest, times = ncol(X)))
+n_samples <- 2000
+theta_init <- c(rep(0, ncol(X)), 10)
+```
+
+
+```{r, message=FALSE}
+post_samples  <- slice_sampler(
+  logpost , x_init = theta_init, w = w, n_samples = n_samples
+)
+```
+
+\newpage
+
+**Convergence Diagnostic**
+
+```{r, fig.height=8, echo=FALSE}
+burn_in <- 300
+# Remove samples for sigma_sq
+beta_samples <- post_samples[, -ncol(post_samples)]
+
+
+# Graph Sample Number vs Value
+df_beta_samples <- as.data.frame(beta_samples)
+names(df_beta_samples) <- c("beta0", "beta1", "beta2", "beta3")
+df_beta_samples$samples <- 1:nrow(beta_samples)
+df_tidy <- df_beta_samples %>%
+  tidyr::pivot_longer(beta0:beta3, names_to = "coef") %>%
+  dplyr::mutate(coef = as.factor(coef))
+
+levels(df_tidy$coef) <- c(
+  beta0  = TeX("$\\beta_0$"),
+  beta1  = TeX("$\\beta_1$"),
+  beta2  = TeX("$\\beta_2$"),
+  beta3  = TeX("$\\beta_3$")
+)
+
+g1 <- ggplot(df_tidy, aes(samples , value)) +
+  geom_line() +
+  facet_wrap(~coef, ncol = 1, scales = "free_y", labeller = label_parsed) +
+  geom_vline(xintercept = burn_in, color = "red", linetype = "dashed") +
+  theme_bw()
+
+max_lag <- 200
+ls_acfs <- apply(beta_samples, MARGIN = 2, FUN = acf, lag.max = max_lag, plot = FALSE)
+acfs <- unlist(lapply(ls_acfs, `[[`, 1))
+df_acfs <- data.frame(
+  coef = as.factor(sapply(c("beta0", "beta1", "beta2", "beta3"), rep, times = max_lag + 1)),
+  lag = 0:max_lag,
+  acf = acfs
+)
+
+levels(df_acfs$coef) <- c(
+  beta0  = TeX("$\\beta_0$"),
+  beta1  = TeX("$\\beta_1$"),
+  beta2  = TeX("$\\beta_2$"),
+  beta3  = TeX("$\\beta_3$")
+)
+
+g2 <- ggplot(df_acfs, aes(lag, acf)) +
+  geom_bar(stat = "identity") +
+  geom_hline(yintercept =  1.96 * n_samples^(-0.5), color = "blue", linetype = "dashed") +
+  geom_hline(yintercept = -1.96 * n_samples^(-0.5), color = "blue", linetype = "dashed") +
+  facet_wrap(~coef, ncol = 1, scales = "free_y", labeller = label_parsed) +
+  theme_bw()
+
+g1 + g2
+```
+
+
+\newpage
+
+**Convergence Diagnostic - 300 burn-in samples removed**
+
+```{r, fig.height=8, echo=FALSE}
+# Remove samples for sigma_sq and 300 burn-in
+beta_samples_no_burnin <- beta_samples[(burn_in + 1):nrow(beta_samples), ]
+
+# Graph Sample Number vs Value
+df <- as.data.frame(beta_samples_no_burnin)
+names(df) <- paste0("beta", 0:3)
+df$samples <- 1:nrow(beta_samples_no_burnin)
+df_tidy <- df %>%
+  tidyr::pivot_longer(beta0:beta3, names_to = "coef") %>%
+  dplyr::mutate(coef = as.factor(coef))
+
+levels(df_tidy$coef) <- c(
+  beta0  = TeX("$\\beta_0$"),
+  beta1  = TeX("$\\beta_1$"),
+  beta2  = TeX("$\\beta_2$"),
+  beta3  = TeX("$\\beta_3$")
+)
+
+g1 <- ggplot(df_tidy, aes(samples , value)) +
+  geom_line() +
+  facet_wrap(~coef, ncol = 1, scales = "free_y", labeller = label_parsed) +
+  theme_bw()
+
+max_lag <- 200
+ls_acfs <- apply(beta_samples, MARGIN = 2, FUN = acf, lag.max = max_lag, plot = FALSE)
+acfs <- unlist(lapply(ls_acfs, `[[`, 1))
+df_acfs <- data.frame(
+  coef = as.factor(sapply(c("beta0", "beta1", "beta2", "beta3"), rep, times = max_lag + 1)),
+  lag = 0:max_lag,
+  acf = acfs
+)
+
+levels(df_acfs$coef) <- c(
+  beta0  = TeX("$\\beta_0$"),
+  beta1  = TeX("$\\beta_1$"),
+  beta2  = TeX("$\\beta_2$"),
+  beta3  = TeX("$\\beta_3$")
+)
+
+g2 <- ggplot(df_acfs, aes(lag, acf)) +
+  geom_bar(stat = "identity") +
+  geom_hline(yintercept =  1.96 * n_samples^(-0.5), color="blue", linetype="dashed") +
+  geom_hline(yintercept = -1.96 * n_samples^(-0.5), color="blue", linetype="dashed") +
+  facet_wrap(~coef, ncol = 1, scales = "free_y", labeller = label_parsed) +
+  theme_bw()
+
+g1 + g2
+```
+
+
+\newpage
+
+**Coefficients and Credibility Intervals**
+
+```{r, echo=FALSE, comment=""}
+summary_raw <- t(apply(beta_samples_no_burnin, 2, function(x) {
+  c(
+    round(mean(x), 3),
+    round(quantile(x, prob = 0.025), 3),
+    round(quantile(x, prob = 0.975), 3)
+  )
+}))
+summary_df <- data.frame(summary_raw)
+rownames(summary_df) <- colnames(X)
+colnames(summary_df) <- c("Mean", "2.5%", "97.5%")
+summary_df
+```
+
+**Comparison with frequentist calculation**
+
+Expected to be similar as non-informative prior was chosen.
+
+```{r, echo=FALSE, comment=""}
+mylm <- lm(y ~ X - 1)
+summary_mylm <- as.data.frame(cbind(mylm$coefficients, confint(mylm)))
+summary_mylm <- round(summary_mylm, 3)
+rownames(summary_mylm) <- substring(rownames(summary_mylm), 2)
+colnames(summary_mylm) <- c("Mean", "2.5%", "97.5%")
+summary_mylm
+```
+
+
+
